@@ -10,6 +10,7 @@ import {
   deleteReview,
   itemRatings,
   itemWithRatings,
+  listCommunityFeed,
   listItemReviews,
   listMyReviews,
   listOutletReviews,
@@ -18,6 +19,7 @@ import {
   outletReviewSummary,
   PAGE_SIZE_MAX,
   reportReview,
+  toggleHelpfulLike,
   updateReview,
 } from './reviews.service.js';
 
@@ -39,6 +41,8 @@ const reviewFields = {
     .pipe(z.string().trim().max(1000, 'Keep your review under 1000 characters'))
     .transform((v) => (v === '' ? null : v))
     .nullable(),
+  /** Optional URL of a photo uploaded via POST /uploads/review-photos. */
+  photoUrl: z.url().max(1000).nullable(),
   taste: level,
   portion: level,
   freshness: level,
@@ -48,6 +52,7 @@ const createBody = z
   .object({
     rating: reviewFields.rating,
     body: reviewFields.body.default(null),
+    photoUrl: reviewFields.photoUrl.default(null),
     taste: level.default(null),
     portion: level.default(null),
     freshness: level.default(null),
@@ -85,6 +90,12 @@ const reviewsQuery = z.object({
   pageSize,
 });
 const pageQuery = z.object({ page, pageSize });
+const communityFeedQuery = z.object({
+  outletId: z.uuid().optional(),
+  menuItemId: z.uuid().optional(),
+  page,
+  pageSize,
+});
 const outletQuery = z.object({
   filter: z.enum(['all', 'reported', 'hidden']).default('all'),
   page,
@@ -139,9 +150,28 @@ export function menuItemReviewsRouter(db: Database) {
   return router;
 }
 
-/** /api/v1/reviews/:reviewId — the author edits or deletes; any student can report. */
+/**
+ * /api/v1/reviews
+ * Public: GET / — community feed (all published reviews, newest first).
+ * Student: PATCH/DELETE /:reviewId — edit or delete own review.
+ * Student: POST /:reviewId/report — report a review.
+ * Student: POST /:reviewId/helpful — toggle helpful like.
+ */
 export function reviewsRouter(db: Database) {
   const router = Router();
+
+  // ─── Public route ──────────────────────────────────────────────────────────
+  router.get('/', async (req, res) => {
+    const query = communityFeedQuery.parse(req.query);
+    res.json(
+      await listCommunityFeed(db, {
+        ...query,
+        viewerId: req.auth?.user.id,
+      }),
+    );
+  });
+
+  // ─── Student-only routes ───────────────────────────────────────────────────
   router.use(requireRole('STUDENT'));
 
   router.patch('/:reviewId', async (req, res) => {
@@ -160,6 +190,15 @@ export function reviewsRouter(db: Database) {
     const { reason, note } = reportBody.parse(req.body);
     await reportReview(db, req.auth!.user.id, idParam(req, 'reviewId', 'Review'), reason, note);
     res.json({ reported: true });
+  });
+
+  router.post('/:reviewId/helpful', async (req, res) => {
+    const result = await toggleHelpfulLike(
+      db,
+      idParam(req, 'reviewId', 'Review'),
+      req.auth!.user.id,
+    );
+    res.json(result);
   });
 
   return router;

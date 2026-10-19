@@ -38,6 +38,7 @@ export type ReviewSort = 'recent' | 'highest' | 'lowest';
 export interface ReviewInput {
   rating: number;
   body: string | null;
+  photoUrl?: string | null;
   taste: FeedbackLevel | null;
   portion: FeedbackLevel | null;
   freshness: FeedbackLevel | null;
@@ -60,6 +61,8 @@ function toPublicReview(r: ReviewRow, viewerId?: string) {
     id: r.id,
     rating: r.rating,
     body: r.body,
+    photoUrl: r.photoUrl ?? null,
+    helpfulCount: r.helpfulCount,
     feedback: { taste: r.taste, portion: r.portion, freshness: r.freshness, value: r.value },
     verifiedPurchase: r.verifiedPurchase,
     author: publicName(r.user.displayName),
@@ -517,4 +520,94 @@ export async function outletReviewSummary(db: Database, outletId: string, now = 
     items,
     recentFeedback: latest.map((r) => ({ ...toPublicReview(r), item: r.menuItem })),
   };
+}
+
+// ─── Community feed ───────────────────────────────────────────────────────────
+
+export interface CommunityFeedOptions {
+  outletId?: string;
+  menuItemId?: string;
+  page: number;
+  pageSize: number;
+  viewerId?: string;
+}
+
+/**
+ * Campus-wide community feed: all PUBLISHED reviews, newest first.
+ * Optionally filtered by outlet or specific menu item.
+ */
+export async function listCommunityFeed(db: Database, opts: CommunityFeedOptions) {
+  const where: Prisma.FoodReviewWhereInput = {
+    status: 'PUBLISHED',
+    ...(opts.outletId && { outletId: opts.outletId }),
+    ...(opts.menuItemId && { menuItemId: opts.menuItemId }),
+  };
+  const [total, rows] = await Promise.all([
+    db.foodReview.count({ where }),
+    db.foodReview.findMany({
+      where,
+      orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
+      skip: (opts.page - 1) * opts.pageSize,
+      take: opts.pageSize,
+      include: {
+        ...reviewInclude,
+        menuItem: { select: { id: true, name: true } },
+        outlet: { select: { id: true, slug: true, name: true } },
+      },
+    }),
+  ]);
+  return {
+    reviews: rows.map((r) => ({
+      ...toPublicReview(r, opts.viewerId),
+      item: { id: r.menuItem.id, name: r.menuItem.name },
+      outlet: r.outlet,
+    })),
+    page: opts.page,
+    pageSize: opts.pageSize,
+    total,
+    hasMore: opts.page * opts.pageSize < total,
+  };
+}
+
+// ─── Helpful likes ────────────────────────────────────────────────────────────
+
+/**
+ * Toggles a student's helpful like on a published review.
+ * Returns the new liked state and updated helpfulCount.
+ */
+export async function toggleHelpfulLike(
+  db: Database,
+  reviewId: string,
+  userId: string,
+): Promise<{ liked: boolean; helpfulCount: number }> {
+  return db.$transaction(async (tx) => {
+    const review = await tx.foodReview.findFirst({
+      where: { id: reviewId, status: 'PUBLISHED' },
+      select: { id: true },
+    });
+    if (!review) throw notFound('Review not found');
+
+    const existing = await tx.reviewLike.findUnique({
+      where: { reviewId_userId: { reviewId, userId } },
+      select: { id: true },
+    });
+
+    if (existing) {
+      await tx.reviewLike.delete({ where: { reviewId_userId: { reviewId, userId } } });
+      const updated = await tx.foodReview.update({
+        where: { id: reviewId },
+        data: { helpfulCount: { decrement: 1 } },
+        select: { helpfulCount: true },
+      });
+      return { liked: false, helpfulCount: Math.max(0, updated.helpfulCount) };
+    } else {
+      await tx.reviewLike.create({ data: { reviewId, userId } });
+      const updated = await tx.foodReview.update({
+        where: { id: reviewId },
+        data: { helpfulCount: { increment: 1 } },
+        select: { helpfulCount: true },
+      });
+      return { liked: true, helpfulCount: updated.helpfulCount };
+    }
+  });
 }

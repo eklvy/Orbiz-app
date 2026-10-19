@@ -1,5 +1,5 @@
 import { prisma } from '../lib/prisma.js';
-import type { Dietary, OutletStatus } from '../generated/prisma/enums.js';
+import type { Dietary, OutletStatus, SpiceLevel } from '../generated/prisma/enums.js';
 
 /** Test-only builders. Each call creates rows in the test database. */
 
@@ -31,6 +31,7 @@ export async function makeItem(
     name?: string;
     pricePaise?: number;
     dietary?: Dietary | null;
+    spiceLevel?: SpiceLevel | null;
     isAvailable?: boolean;
     isActive?: boolean;
     description?: string;
@@ -44,6 +45,7 @@ export async function makeItem(
       description: overrides.description ?? '',
       pricePaise: overrides.pricePaise ?? 5000,
       dietary: overrides.dietary === undefined ? 'VEG' : overrides.dietary,
+      spiceLevel: overrides.spiceLevel ?? null,
       isAvailable: overrides.isAvailable ?? true,
       isActive: overrides.isActive ?? true,
     },

@@ -12,11 +12,13 @@ const listQuery = z.object({
   limit: z.coerce.number().int().min(1).max(50).default(25),
   cursor: z.string().max(200).optional(),
 });
-const grantBody = z.object({ role: z.enum(['MANAGER', 'POS', 'ADMIN']) }).strict();
+const grantBody = z
+  .object({ role: z.enum(['MANAGER', 'POS', 'ADMIN', 'FACULTY', 'STAFF', 'EXECUTIVE', 'GUEST']) })
+  .strict();
 const revokeBody = z
   .object({ reason: z.string().trim().min(3, 'Give a reason').max(200) })
   .strict();
-const roleParam = z.enum(['MANAGER', 'POS', 'ADMIN']);
+const roleParam = z.enum(['MANAGER', 'POS', 'ADMIN', 'FACULTY', 'STAFF', 'EXECUTIVE', 'GUEST']);
 
 function userIdParam(req: Request) {
   const parsed = z.uuid().safeParse(req.params.userId);

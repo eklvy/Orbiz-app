@@ -14,6 +14,7 @@ import {
   createItemBody,
   outletStatusBody,
   updateCategoryBody,
+  updateIntelligenceBody,
   updateItemBody,
   uuidParam,
 } from './outlets.schema.js';
@@ -237,6 +238,23 @@ export function staffOutletsRouter(db: Database, realtime: RealtimePublisher) {
       }),
     );
     res.json({ item: toMenuItemAdmin(item) });
+  });
+
+  /**
+   * PATCH /:outletId/intelligence — update crowd level, queue length, seats,
+   * rating and specialty items. Managers only.
+   *
+   * These values are MANUALLY maintained. They do not update automatically and
+   * do not reflect live real-time data unless the manager has just set them.
+   */
+  router.patch('/:outletId/intelligence', manager, async (req, res) => {
+    const outletId = idParam(req, 'outletId');
+    const body = updateIntelligenceBody.parse(req.body);
+    const outlet = await db.outlet.update({
+      where: { id: outletId },
+      data: { ...body, intelligenceUpdatedAt: new Date() },
+    });
+    res.json({ outlet: toOutletAdmin(outlet) });
   });
 
   /** Mark an item sold out / back in stock. Managers and POS staff. */

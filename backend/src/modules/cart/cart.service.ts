@@ -8,12 +8,11 @@ export const MAX_QUANTITY = 10;
 export const MAX_DISTINCT_ITEMS = 20;
 
 const cartInclude = {
-  outlet: true,
   items: {
-    include: { menuItem: { include: { category: true } } },
+    include: { menuItem: { include: { category: true, outlet: true } } },
     orderBy: { createdAt: 'asc' as const },
   },
-};
+} as const;
 
 export type CartIssueReason = 'SOLD_OUT' | 'NO_LONGER_ON_MENU' | 'NOT_ENOUGH_STOCK';
 
@@ -37,74 +36,147 @@ export async function getCartView(db: DbClient, userId: string) {
     maxRedeemablePoints: maxRedeemablePoints(subtotalPaise, availablePoints),
     pointValuePaise: POINT_VALUE_PAISE,
   });
-  if (!cart || cart.items.length === 0 || !cart.outlet) {
+  if (!cart || cart.items.length === 0) {
     return {
-      outlet: null,
-      items: [],
+      outlet: null as null | {
+        id: string;
+        slug: string;
+        name: string;
+        status: string;
+        acceptingOrders: boolean;
+      },
+      items: [] as ReturnType<typeof buildLineItem>[],
       itemCount: 0,
       subtotalPaise: 0,
       totalPaise: 0,
-      issues: [],
+      issues: [] as CartIssue[],
       canCheckout: false,
       canSchedule: false,
       loyalty: loyalty(0),
+      outletGroups: [] as OutletGroup[],
+      isMultiOutlet: false,
     };
   }
 
-  const issues: {
-    menuItemId: string;
-    name: string;
-    reason: CartIssueReason;
-    /** For NOT_ENOUGH_STOCK: how many can still be ordered. */
-    available?: number;
-  }[] = [];
-  const items = cart.items.map(({ menuItem, quantity }) => {
-    const onMenu =
-      menuItem.isActive && menuItem.category.isActive && menuItem.outletId === cart.outletId;
-    const orderable = onMenu && hasStockFor(menuItem, quantity);
-    if (!orderable) {
-      issues.push({
-        menuItemId: menuItem.id,
-        name: menuItem.name,
-        reason: !onMenu ? 'NO_LONGER_ON_MENU' : inStock(menuItem) ? 'NOT_ENOUGH_STOCK' : 'SOLD_OUT',
-        ...(onMenu && inStock(menuItem) && { available: menuItem.stockQuantity ?? 0 }),
-      });
-    }
-    return {
-      menuItemId: menuItem.id,
-      name: menuItem.name,
-      dietary: menuItem.dietary,
-      unitPricePaise: menuItem.pricePaise,
-      quantity,
-      lineTotalPaise: menuItem.pricePaise * quantity,
-      isOrderable: orderable,
-      stockStatus: stockStatus(menuItem),
-    };
-  });
+  // Group items by outlet
+  const outletMap = new Map<
+    string,
+    { outlet: (typeof cart.items)[0]['menuItem']['outlet']; items: (typeof cart.items) }
+  >();
+  for (const cartItem of cart.items) {
+    const oid = cartItem.menuItem.outletId;
+    if (!outletMap.has(oid)) outletMap.set(oid, { outlet: cartItem.menuItem.outlet, items: [] });
+    outletMap.get(oid)!.items.push(cartItem);
+  }
 
-  const subtotalPaise = items.reduce((sum, item) => sum + item.lineTotalPaise, 0);
-  const acceptingOrders = cart.outlet.isActive && cart.outlet.status === 'OPEN';
+  const isMultiOutlet = outletMap.size > 1;
+  const allIssues: CartIssue[] = [];
+  const allItems: ReturnType<typeof buildLineItem>[] = [];
+  const outletGroups: OutletGroup[] = [];
+
+  for (const { outlet, items } of outletMap.values()) {
+    const issues: CartIssue[] = [];
+    const lineItems = items.map(({ menuItem, quantity }) => {
+      const item = buildLineItem(menuItem, quantity, issues);
+      return item;
+    });
+    allIssues.push(...issues);
+    allItems.push(...lineItems);
+    const groupSubtotal = lineItems.reduce((sum, i) => sum + i.lineTotalPaise, 0);
+    const acceptingOrders = outlet.isActive && outlet.status === 'OPEN';
+    outletGroups.push({
+      outlet: {
+        id: outlet.id,
+        slug: outlet.slug,
+        name: outlet.name,
+        status: outlet.status,
+        acceptingOrders,
+      },
+      items: lineItems,
+      subtotalPaise: groupSubtotal,
+      issues,
+      canCheckout: issues.length === 0 && acceptingOrders,
+      canSchedule: issues.length === 0 && outlet.isActive && outlet.status !== 'PAUSED',
+    });
+  }
+
+  const subtotalPaise = allItems.reduce((sum, item) => sum + item.lineTotalPaise, 0);
+  const canCheckout = allIssues.length === 0 && outletGroups.every((g) => g.canCheckout);
+  const canSchedule = allIssues.length === 0 && outletGroups.every((g) => g.canSchedule);
+
   return {
-    outlet: {
-      id: cart.outlet.id,
-      slug: cart.outlet.slug,
-      name: cart.outlet.name,
-      status: cart.outlet.status,
-      acceptingOrders,
-    },
-    items,
-    itemCount: items.reduce((sum, item) => sum + item.quantity, 0),
+    /** null for multi-outlet carts; populated for single-outlet (backward compat). */
+    outlet: isMultiOutlet ? null : (outletGroups[0]?.outlet ?? null),
+    items: allItems,
+    itemCount: allItems.reduce((sum, item) => sum + item.quantity, 0),
     subtotalPaise,
     totalPaise: subtotalPaise, // no fees or taxes (decision Q7)
-    issues,
-    canCheckout: issues.length === 0 && acceptingOrders,
+    issues: allIssues,
+    canCheckout,
     /**
      * Could be placed as a scheduled order (for a later pickup slot), even while the outlet
      * is closed right now. A paused outlet takes no new orders at all. Slots are checked on
      * their own (GET /outlets/:slug/slots) and again at checkout.
      */
-    canSchedule: issues.length === 0 && cart.outlet.isActive && cart.outlet.status !== 'PAUSED',
+    canSchedule,
     loyalty: loyalty(subtotalPaise),
+    /** Per-outlet breakdown. Length 1 for single-outlet, >1 for multi-outlet. */
+    outletGroups,
+    isMultiOutlet,
+  };
+}
+
+type CartIssue = {
+  menuItemId: string;
+  name: string;
+  reason: CartIssueReason;
+  available?: number;
+};
+
+type OutletGroup = {
+  outlet: { id: string; slug: string; name: string; status: string; acceptingOrders: boolean };
+  items: ReturnType<typeof buildLineItem>[];
+  subtotalPaise: number;
+  issues: CartIssue[];
+  canCheckout: boolean;
+  canSchedule: boolean;
+};
+
+function buildLineItem(
+  menuItem: {
+    id: string;
+    name: string;
+    dietary: string | null;
+    pricePaise: number;
+    isActive: boolean;
+    isAvailable: boolean;
+    stockQuantity: number | null;
+    trackInventory: boolean;
+    lowStockThreshold: number;
+    category: { isActive: boolean };
+  },
+  quantity: number,
+  issues: CartIssue[],
+) {
+  const onMenu = menuItem.isActive && menuItem.category.isActive;
+  const orderable = onMenu && hasStockFor(menuItem, quantity);
+  if (!orderable) {
+    issues.push({
+      menuItemId: menuItem.id,
+      name: menuItem.name,
+      reason: !onMenu ? 'NO_LONGER_ON_MENU' : inStock(menuItem) ? 'NOT_ENOUGH_STOCK' : 'SOLD_OUT',
+      ...(onMenu && inStock(menuItem) && { available: menuItem.stockQuantity ?? 0 }),
+    });
+  }
+  return {
+    menuItemId: menuItem.id,
+    name: menuItem.name,
+    dietary: menuItem.dietary,
+    unitPricePaise: menuItem.pricePaise,
+    quantity,
+    lineTotalPaise: menuItem.pricePaise * quantity,
+    isOrderable: orderable,
+    stockStatus: stockStatus(menuItem),
   };
 }
 
@@ -124,6 +196,17 @@ async function ensureCart(tx: DbClient, userId: string) {
 /** Locks the user's cart row for the rest of the transaction (serialises cart changes and checkout). */
 export async function lockCart(tx: DbClient, userId: string) {
   await tx.$queryRaw`SELECT id FROM "Cart" WHERE "userId" = ${userId}::uuid FOR UPDATE`;
+}
+
+/** Recomputes cart.outletId based on current cart items (null if empty or multi-outlet). */
+async function syncCartOutletId(tx: DbClient, cartId: string): Promise<void> {
+  const outlets = await tx.menuItem.findMany({
+    where: { cartItems: { some: { cartId } } },
+    select: { outletId: true },
+    distinct: ['outletId'],
+  });
+  const outletId = outlets.length === 1 ? outlets[0]!.outletId : null;
+  await tx.cart.update({ where: { id: cartId }, data: { outletId } });
 }
 
 export async function addItem(
@@ -157,35 +240,13 @@ export async function addItem(
     await lockCart(tx, userId);
     const cart = await tx.cart.findUniqueOrThrow({
       where: { userId },
-      include: { outlet: true, items: true },
+      include: { items: true },
     });
 
-    if (cart.items.length > 0 && cart.outletId && cart.outletId !== menuItem.outletId) {
-      if (!input.replaceCart) {
-        throw new AppError(
-          409,
-          'CART_OUTLET_CONFLICT',
-          `Your cart has items from ${cart.outlet?.name ?? 'another outlet'}. A cart can hold items from one outlet at a time.`,
-          {
-            currentOutlet: cart.outlet && {
-              id: cart.outlet.id,
-              name: cart.outlet.name,
-              slug: cart.outlet.slug,
-            },
-            newOutlet: {
-              id: menuItem.outlet.id,
-              name: menuItem.outlet.name,
-              slug: menuItem.outlet.slug,
-            },
-          },
-        );
-      }
-      // The student explicitly chose to start a new cart.
+    if (input.replaceCart && cart.items.length > 0) {
       await tx.cartItem.deleteMany({ where: { cartId: cart.id } });
       cart.items = [];
     }
-
-    await tx.cart.update({ where: { id: cart.id }, data: { outletId: menuItem.outletId } });
 
     const existing = cart.items.find((i) => i.menuItemId === menuItem.id);
     const wanted = (existing?.quantity ?? 0) + input.quantity;
@@ -212,6 +273,8 @@ export async function addItem(
         data: { cartId: cart.id, menuItemId: menuItem.id, quantity: input.quantity },
       });
     }
+
+    await syncCartOutletId(tx, cart.id);
   });
   return getCartView(db, userId);
 }
@@ -243,9 +306,7 @@ export async function removeItem(db: Database, userId: string, menuItemId: strin
     if (!cart) throw notFound('That item is not in your cart.');
     const { count } = await tx.cartItem.deleteMany({ where: { cartId: cart.id, menuItemId } });
     if (count === 0) throw notFound('That item is not in your cart.');
-    if ((await tx.cartItem.count({ where: { cartId: cart.id } })) === 0) {
-      await tx.cart.update({ where: { id: cart.id }, data: { outletId: null } });
-    }
+    await syncCartOutletId(tx, cart.id);
   });
   return getCartView(db, userId);
 }
@@ -260,9 +321,9 @@ export async function clearCart(db: DbClient, userId: string) {
 
 /**
  * Adds several dishes at once (a Surprise Meal combo) in ONE transaction: every dish is
- * re-checked against the live menu and the total against what the student saw, the usual
- * one-outlet rule applies, and nothing is added unless everything is valid. Repeating the
- * same idempotency key (double-click, retry) adds nothing more.
+ * re-checked against the live menu and the total against what the student saw, the combo
+ * must come from one outlet, and nothing is added unless everything is valid. Repeating
+ * the same idempotency key (double-click, retry) adds nothing more.
  */
 export async function addCombo(
   db: Database,
@@ -328,27 +389,12 @@ export async function addCombo(
     await lockCart(tx, userId);
     const cart = await tx.cart.findUniqueOrThrow({
       where: { userId },
-      include: { outlet: true, items: true },
+      include: { items: true },
     });
     // The same combo submitted again (after the first one committed): already added.
     if (cart.lastComboKey === input.idempotencyKey) return false;
 
-    if (cart.items.length > 0 && cart.outletId && cart.outletId !== outlet.id) {
-      if (!input.replaceCart) {
-        throw new AppError(
-          409,
-          'CART_OUTLET_CONFLICT',
-          `Your cart has items from ${cart.outlet?.name ?? 'another outlet'}. A cart can hold items from one outlet at a time.`,
-          {
-            currentOutlet: cart.outlet && {
-              id: cart.outlet.id,
-              name: cart.outlet.name,
-              slug: cart.outlet.slug,
-            },
-            newOutlet: { id: outlet.id, name: outlet.name, slug: outlet.slug },
-          },
-        );
-      }
+    if (input.replaceCart && cart.items.length > 0) {
       await tx.cartItem.deleteMany({ where: { cartId: cart.id } });
       cart.items = [];
     }
@@ -384,10 +430,9 @@ export async function addCombo(
         await tx.cartItem.create({ data: { cartId: cart.id, menuItemId, quantity } });
       }
     }
-    await tx.cart.update({
-      where: { id: cart.id },
-      data: { outletId: outlet.id, lastComboKey: input.idempotencyKey },
-    });
+
+    await syncCartOutletId(tx, cart.id);
+    await tx.cart.update({ where: { id: cart.id }, data: { lastComboKey: input.idempotencyKey } });
     return true;
   });
   return { cart: await getCartView(db, userId), added };

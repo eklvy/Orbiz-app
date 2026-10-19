@@ -1,6 +1,6 @@
 import type { Database } from '../../lib/prisma.js';
 import type { Prisma } from '../../generated/prisma/client.js';
-import type { Dietary } from '../../generated/prisma/enums.js';
+import type { Dietary, SpiceLevel } from '../../generated/prisma/enums.js';
 import { inStock, inStockWhere } from '../inventory/stock.js';
 import { NO_RATINGS, ratingSummaries } from '../reviews/ratings.js';
 import { recencyScore } from '../reorder/reorder.rules.js';
@@ -46,6 +46,7 @@ export interface MenuSearch {
   categoryId?: string;
   q?: string;
   dietary?: Dietary;
+  spiceLevel?: SpiceLevel;
   /** Only dishes that can be ordered right now. */
   inStockOnly?: boolean;
   sort?: MenuSort;
@@ -136,6 +137,7 @@ export async function searchMenu(db: Database, search: MenuSearch, now = new Dat
     ...(search.outletId && { outletId: search.outletId }),
     ...(search.categoryId && { categoryId: search.categoryId }),
     ...(search.dietary && { dietary: search.dietary }),
+    ...(search.spiceLevel && { spiceLevel: search.spiceLevel }),
     ...(search.inStockOnly && inStockWhere),
     ...(q && {
       OR: [

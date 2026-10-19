@@ -7,11 +7,14 @@ import { slugify } from '../../lib/slug.js';
 import { requireRole } from '../../middleware/auth.js';
 import {
   assignStaffBody,
+  createCampusLocationBody,
   createOutletBody,
+  updateCampusLocationBody,
+  updateCoordinatesBody,
   updateOutletBody,
   uuidParam,
 } from './outlets.schema.js';
-import { toOutletAdmin } from './outlets.serializer.js';
+import { toCampusLocation, toOutletAdmin } from './outlets.serializer.js';
 import type { RealtimePublisher } from '../../realtime/publisher.js';
 
 function idParam(req: Request, name: string): string {
@@ -143,6 +146,58 @@ export function adminOutletsRouter(db: Database, realtime: RealtimePublisher) {
     res.status(result.created ? 201 : 200).json({
       assignment: { id: result.assignment.id, role: result.assignment.role, outletId },
     });
+  });
+
+  /** PATCH /:outletId/coordinates — admin sets or clears the outlet's map position. */
+  router.patch('/:outletId/coordinates', async (req, res) => {
+    const outletId = idParam(req, 'outletId');
+    const body = updateCoordinatesBody.parse(req.body);
+    const before = await db.outlet.findUnique({ where: { id: outletId } });
+    if (!before) throw notFound('Outlet not found');
+    const outlet = await db.$transaction(async (tx) => {
+      const updated = await tx.outlet.update({ where: { id: outletId }, data: body });
+      await recordAudit(tx, {
+        actor: actorOf(req),
+        action: 'OUTLET_COORDINATES_UPDATED',
+        entityType: 'Outlet',
+        entityId: outletId,
+        metadata: { latitude: body.latitude, longitude: body.longitude },
+      });
+      return updated;
+    });
+    res.json({ outlet: toOutletAdmin(outlet) });
+  });
+
+  // ─── Campus locations CRUD ─────────────────────────────────────────────────
+
+  router.get('/map/locations', async (_req, res) => {
+    const locations = await db.campusLocation.findMany({ orderBy: { name: 'asc' } });
+    res.json({ locations: locations.map(toCampusLocation) });
+  });
+
+  router.post('/map/locations', async (req, res) => {
+    const body = createCampusLocationBody.parse(req.body);
+    const existing = await db.campusLocation.findUnique({ where: { slug: body.slug } });
+    if (existing) throw new AppError(409, 'DUPLICATE_SLUG', 'A location with this slug already exists.');
+    const location = await db.campusLocation.create({ data: body });
+    res.status(201).json({ location: toCampusLocation(location) });
+  });
+
+  router.patch('/map/locations/:locationId', async (req, res) => {
+    const locationId = idParam(req, 'locationId');
+    const existing = await db.campusLocation.findUnique({ where: { id: locationId } });
+    if (!existing) throw notFound('Campus location not found');
+    const body = updateCampusLocationBody.parse(req.body);
+    const location = await db.campusLocation.update({ where: { id: locationId }, data: body });
+    res.json({ location: toCampusLocation(location) });
+  });
+
+  router.delete('/map/locations/:locationId', async (req, res) => {
+    const locationId = idParam(req, 'locationId');
+    const existing = await db.campusLocation.findUnique({ where: { id: locationId } });
+    if (!existing) throw notFound('Campus location not found');
+    await db.campusLocation.delete({ where: { id: locationId } });
+    res.status(204).end();
   });
 
   router.delete('/:outletId/staff/:assignmentId', async (req, res) => {

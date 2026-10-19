@@ -64,6 +64,7 @@ export function publicOutletsRouter(db: Database) {
         categoryId: filters.category,
         q: filters.q,
         dietary: filters.dietary,
+        spiceLevel: filters.spiceLevel,
         inStockOnly: filters.inStock,
         sort: filters.sort,
         viewerId: studentId(req),

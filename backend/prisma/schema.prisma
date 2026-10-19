@@ -24,6 +24,14 @@ enum Role {
   MANAGER
   POS
   ADMIN
+  /// Campus academic personnel. Can order and view outlet analytics.
+  FACULTY
+  /// Campus non-academic staff. Can order.
+  STAFF
+  /// Senior campus leadership. Can order and view outlet analytics.
+  EXECUTIVE
+  /// External visitor with limited ordering access. Cannot manage resources.
+  GUEST
 }
 
 /// How a role was granted. ALLOWLIST grants only happen when a new account is created.
@@ -101,6 +109,7 @@ model User {
   foodReviews             FoodReview[]
   foodReviewsModerated    FoodReview[]                @relation("FoodReviewModeratedBy")
   foodReviewReports       FoodReviewReport[]
+  reviewLikes             ReviewLike[]
   savedMealCombos         SavedMealCombo[]
   reorderEvents           ReorderEvent[]
   pickupRedemptions       PickupCredential[]          @relation("PickupRedeemedBy")
@@ -108,6 +117,12 @@ model User {
   pickupAttempts          PickupVerificationAttempt[]
   handoversGiven          OrderHandover[]
   notifications           Notification[]
+  reservations            TableReservation[]
+  reservationsDecided     TableReservation[]        @relation("ReservationDecidedBy")
+  rewardRedemptions       RewardRedemption[]
+  spendingBudget          SpendingBudget?
+  refundRequests          RefundRequest[] @relation("RefundRequests")
+  refundDecisions         RefundRequest[] @relation("RefundDecisions")
 }
 
 /// Links a sign-in provider's stable subject (Google "sub") to a user.
@@ -204,6 +219,13 @@ enum Dietary {
   EGG
 }
 
+/// Heat level of a dish, set by the manager.
+enum SpiceLevel {
+  MILD
+  MEDIUM
+  HOT
+}
+
 model Outlet {
   id          String       @id @default(uuid()) @db.Uuid
   slug        String       @unique
@@ -248,6 +270,26 @@ model Outlet {
   /// AUTO only accepts while the order's estimated wait is at most this. Database CHECK 5–120.
   autoAcceptMaxWaitMinutes Int            @default(30)
 
+  // ─── Outlet intelligence (manually updated by manager, never auto-computed) ─
+
+  /// How crowded the outlet appears right now. null = not set.
+  crowdLevel              CrowdLevel?
+  /// Estimated number of people currently queuing. null = not reported.
+  queueLength             Int?
+  /// Empty seats available for dine-in. null = not reported.
+  availableSeats          Int?
+  /// Manager-maintained star rating (1.0–5.0). null = not yet set.
+  outletRating            Float?
+  /// Signature or must-try dishes, e.g. ["Masala Chai", "Puff"]. Up to 10 items.
+  specialtyItems          String[]       @default([])
+  /// When a manager last updated any of the above intelligence fields.
+  intelligenceUpdatedAt   DateTime?
+
+  // ─── Map coordinates (WGS-84, set by admin) ────────────────────────────────
+
+  latitude                Float?
+  longitude               Float?
+
   categories MenuCategory[]
 
   hours               OutletHours[]
@@ -273,6 +315,8 @@ model Outlet {
   handovers           OrderHandover[]
   notifications       Notification[]
   kitchenStat         OutletKitchenStat?
+  diningTables        DiningTable[]
+  tableReservations   TableReservation[]
 }
 
 /// Which outlets a Manager or POS user may operate. Holding the role alone is not enough.
@@ -318,6 +362,7 @@ model MenuItem {
   /// Integer paise (₹1 = 100). Database CHECK: > 0.
   pricePaise        Int
   dietary           Dietary?
+  spiceLevel        SpiceLevel?
   /// false = marked sold out by staff (a manual override that stays until staff restore it).
   /// Shown to students but cannot be ordered.
   isAvailable       Boolean          @default(true)
@@ -339,6 +384,13 @@ model MenuItem {
   isActive          Boolean          @default(true)
   imageUrl          String?
   sortOrder         Int              @default(0)
+  /// Nutrition per serving. All nullable — may be set later by a manager.
+  calories          Float?
+  protein           Float?
+  carbohydrates     Float?
+  fat               Float?
+  /// Known allergens (e.g. "GLUTEN", "DAIRY", "NUTS"). Empty when not declared.
+  allergens         String[]         @default([])
   createdAt         DateTime         @default(now())
   updatedAt         DateTime         @updatedAt
 
@@ -367,11 +419,11 @@ model MenuItem {
 
 // ─── Cart, orders, wallet and payments (Phase 5) ────────────────────────────
 
-/// One cart per user, holding items from at most one outlet.
+/// One cart per user, holding items from one or more outlets.
 model Cart {
   id           String   @id @default(uuid()) @db.Uuid
   userId       String   @unique @db.Uuid
-  /// The outlet the current items come from; null when the cart is empty.
+  /// The single outlet of all items; null when empty or when items span multiple outlets.
   outletId     String?  @db.Uuid
   /// Idempotency key of the last combo added in one go (Surprise Meal), so a repeated
   /// submission of the same combo is recognised and not added twice.
@@ -482,6 +534,8 @@ model Order {
   currency            String        @default("INR")
   /// Client-generated key; a repeated checkout with the same key returns the same order.
   idempotencyKey      String
+  /// Groups all orders from one multi-outlet checkout together. Equal to idempotencyKey for single-outlet.
+  batchKey            String?  @db.Text
   cancelReason        String?
   /// Bumped on every status/payment change, so clients can ignore stale updates.
   version             Int           @default(1)
@@ -506,12 +560,14 @@ model Order {
   estimate           OrderEstimate?
   predictions        OrderPrediction[]
   autoAcceptDecision AutoAcceptDecision?
+  refundRequests     RefundRequest[]
 
   @@unique([userId, idempotencyKey])
   @@unique([outletId, pickupDay, pickupNumber])
   @@index([outletId, status, placedAt])
   @@index([outletId, scheduledFor])
   @@index([userId, placedAt])
+  @@index([userId, batchKey])
 }
 
 /// A snapshot of what was bought. Never changes when the menu changes later.
@@ -703,6 +759,24 @@ model CounterPayment {
   recordedBy User  @relation(fields: [recordedById], references: [id], onDelete: Restrict)
 }
 
+// ─── Monthly spending budget ─────────────────────────────────────────────────
+
+/// Optional per-user monthly spending cap. When set, checkout refuses orders that
+/// would push net spend past the limit for the current calendar month in the user's
+/// chosen timezone. One row per user; absent = no cap.
+model SpendingBudget {
+  id         String   @id @default(uuid()) @db.Uuid
+  userId     String   @unique @db.Uuid
+  /// Monthly cap in paise (₹1 = 100). Database CHECK >= 100.
+  limitPaise Int
+  /// IANA timezone string, default India Standard Time.
+  timezone   String   @default("Asia/Kolkata")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+}
+
 // ─── Today's Special voting ─────────────────────────────────────────────────
 
 /// DRAFT → OPEN → CLOSED → FINALIZED. Only OPEN polls inside their window accept votes.
@@ -809,6 +883,8 @@ enum LoyaltyTransactionType {
   REDEEMED_ORDER
   /// Given back when that order was rejected or cancelled.
   RESTORED_ORDER
+  /// Spent to claim a reward from the catalog.
+  REDEEMED_REWARD
 }
 
 /// The points ledger. Rows are never modified; every change to Wallet.pointsBalance has one.
@@ -832,11 +908,12 @@ model LoyaltyTransaction {
   isSimulated        Boolean
   createdAt          DateTime               @default(now())
 
-  wallet         Wallet              @relation(fields: [walletId], references: [id], onDelete: Restrict)
-  paymentAttempt PaymentAttempt?     @relation(fields: [paymentAttemptId], references: [id], onDelete: Restrict)
-  order          Order?              @relation(fields: [orderId], references: [id], onDelete: Restrict)
-  reverses       LoyaltyTransaction? @relation("LoyaltyReversal", fields: [reversesId], references: [id], onDelete: Restrict)
-  reversedBy     LoyaltyTransaction? @relation("LoyaltyReversal")
+  wallet           Wallet              @relation(fields: [walletId], references: [id], onDelete: Restrict)
+  paymentAttempt   PaymentAttempt?     @relation(fields: [paymentAttemptId], references: [id], onDelete: Restrict)
+  order            Order?              @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  reverses         LoyaltyTransaction? @relation("LoyaltyReversal", fields: [reversesId], references: [id], onDelete: Restrict)
+  reversedBy       LoyaltyTransaction? @relation("LoyaltyReversal")
+  rewardRedemption RewardRedemption?
 
   /// At most one redemption and one restoration per order.
   @@unique([orderId, type])
@@ -1734,6 +1811,8 @@ model FoodReview {
   rating           Int
   /// Optional. Database CHECK: at most 1000 characters.
   body             String?
+  /// Optional photo attached to the review. Stored as a relative filename served by the uploads endpoint.
+  photoUrl         String?
   taste            FeedbackLevel?
   portion          FeedbackLevel?
   freshness        FeedbackLevel?
@@ -1741,6 +1820,8 @@ model FoodReview {
   /// Set by the server from the eligibility check, never from the client.
   verifiedPurchase Boolean          @default(true)
   status           FoodReviewStatus @default(PUBLISHED)
+  /// Cached count of helpful likes. Incremented/decremented atomically via ReviewLike writes.
+  helpfulCount     Int              @default(0)
   moderatedById    String?          @db.Uuid
   moderatedAt      DateTime?
   moderationReason String?
@@ -1753,11 +1834,27 @@ model FoodReview {
   order       Order              @relation(fields: [orderId], references: [id], onDelete: Restrict)
   moderatedBy User?              @relation("FoodReviewModeratedBy", fields: [moderatedById], references: [id], onDelete: Restrict)
   reports     FoodReviewReport[]
+  likes       ReviewLike[]
 
   @@unique([userId, menuItemId])
   @@index([menuItemId, status, createdAt])
   @@index([outletId, status, createdAt])
   @@index([userId, updatedAt])
+  @@index([status, helpfulCount, createdAt])
+}
+
+/// A "helpful" vote from a student on a published review. One like per student per review.
+model ReviewLike {
+  id        String   @id @default(uuid()) @db.Uuid
+  reviewId  String   @db.Uuid
+  userId    String   @db.Uuid
+  createdAt DateTime @default(now())
+
+  review FoodReview @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+  user   User       @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@unique([reviewId, userId])
+  @@index([reviewId])
 }
 
 /// A student flagging a review for the outlet's manager. One report per student per review.
@@ -2042,6 +2139,16 @@ enum AutoAcceptMode {
   AUTO
 }
 
+// ─── Outlet intelligence (Feature: Outlet Intelligence) ──────────────────────
+
+/// How busy the outlet feels. Updated manually by the manager; never auto-computed.
+enum CrowdLevel {
+  LOW
+  MODERATE
+  HIGH
+  VERY_HIGH
+}
+
 enum EstimateSource {
   /// Learned from enough valid single-dish observations.
   HISTORY
@@ -2151,4 +2258,222 @@ model AutoAcceptDecision {
   order Order @relation(fields: [orderId], references: [id], onDelete: Restrict)
 
   @@index([outletId, decidedAt])
+}
+
+// ─── Dining tables and seat reservations ─────────────────────────────────────
+
+/// Current occupancy status of one physical table.
+/// Always reflects a MANUALLY updated value — no camera or sensor data exists.
+enum TableStatus {
+  AVAILABLE
+  OCCUPIED
+  UNAVAILABLE
+}
+
+/// Lifecycle of a table reservation.
+enum ReservationStatus {
+  PENDING
+  CONFIRMED
+  REJECTED
+  CANCELLED
+  COMPLETED
+  /// Set by a system job when a PENDING or CONFIRMED reservation's start time passes
+  /// without any explicit action.
+  EXPIRED
+}
+
+/// One physical table or seating area at an outlet.
+/// Occupancy data is MANUALLY updated by staff — there is no automatic detection.
+model DiningTable {
+  id                 String      @id @default(uuid()) @db.Uuid
+  outletId           String      @db.Uuid
+  /// Human-readable identifier, e.g. "Table 1", "Window Seat A", "Counter 3".
+  label              String
+  /// Maximum seated guests. Database CHECK >= 1.
+  capacity           Int
+  /// Guests currently occupying the table. MANUALLY set by staff. Database CHECK: 0 <= occupancy <= capacity.
+  occupancy          Int         @default(0)
+  status             TableStatus @default(AVAILABLE)
+  /// Optional notes visible only to staff (e.g. "wheelchair accessible").
+  notes              String      @default("")
+  /// Deactivated tables are hidden from public views but kept for historical data.
+  isActive           Boolean     @default(true)
+  /// When a staff member last updated the occupancy or status. null until first update.
+  occupancyUpdatedAt DateTime?
+  createdAt          DateTime    @default(now())
+  updatedAt          DateTime    @updatedAt
+
+  outlet       Outlet             @relation(fields: [outletId], references: [id], onDelete: Restrict)
+  reservations TableReservation[]
+
+  @@unique([outletId, label])
+  @@index([outletId, status, isActive])
+}
+
+/// A user's request to reserve a table at a specific time.
+/// PENDING → CONFIRMED → COMPLETED
+/// PENDING / CONFIRMED → CANCELLED (by the user, before the start time)
+/// PENDING → REJECTED  (by a manager)
+/// PENDING / CONFIRMED → EXPIRED (by a background job if the start time passes)
+model TableReservation {
+  id              String            @id @default(uuid()) @db.Uuid
+  userId          String            @db.Uuid
+  outletId        String            @db.Uuid
+  /// The specific table requested. null means "any available table at this outlet."
+  tableId         String?           @db.Uuid
+  /// Party size. Database CHECK >= 1.
+  partySize       Int
+  startsAt        DateTime
+  /// Must be after startsAt (database CHECK).
+  endsAt          DateTime
+  notes           String            @default("")
+  status          ReservationStatus @default(PENDING)
+  decisionReason  String?
+  decidedByUserId String?           @db.Uuid
+  decidedAt       DateTime?
+  cancelledAt     DateTime?
+  completedAt     DateTime?
+  expiredAt       DateTime?
+  /// Bumped on every status change, so concurrent updates cannot overwrite each other.
+  version         Int               @default(1)
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  user      User                       @relation(fields: [userId], references: [id], onDelete: Restrict)
+  outlet    Outlet                     @relation(fields: [outletId], references: [id], onDelete: Restrict)
+  table     DiningTable?               @relation(fields: [tableId], references: [id], onDelete: Restrict)
+  decidedBy User?                      @relation("ReservationDecidedBy", fields: [decidedByUserId], references: [id], onDelete: Restrict)
+  history   ReservationStatusHistory[]
+
+  @@index([userId, startsAt])
+  @@index([outletId, startsAt, status])
+  @@index([tableId, startsAt, status])
+}
+
+/// Append-only log of every state change on a reservation.
+model ReservationStatusHistory {
+  id              String             @id @default(uuid()) @db.Uuid
+  reservationId   String             @db.Uuid
+  fromStatus      ReservationStatus?
+  toStatus        ReservationStatus
+  actorUserId     String?            @db.Uuid
+  actorRole       Role?
+  reason          String?
+  createdAt       DateTime           @default(now())
+
+  reservation TableReservation @relation(fields: [reservationId], references: [id], onDelete: Restrict)
+
+  @@index([reservationId, createdAt])
+}
+
+// ─── Campus map locations (Feature: Campus Map) ──────────────────────────────
+
+/// A non-outlet point of interest on the campus map (buildings, gates, parking, etc.).
+/// Created and maintained by admins. Outlets have their own lat/lon on the Outlet model.
+model CampusLocation {
+  id          String   @id @default(uuid()) @db.Uuid
+  slug        String   @unique
+  name        String
+  /// Free-form category tag, e.g. "building", "gate", "parking", "library", "sports".
+  category    String
+  latitude    Float
+  longitude   Float
+  description String   @default("")
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([isActive])
+}
+
+// ─── Rewards catalog and vouchers ────────────────────────────────────────────
+
+/// An item in the rewards catalog that students can claim with loyalty points.
+model RewardCatalog {
+  id            String    @id @default(uuid()) @db.Uuid
+  name          String
+  description   String    @default("")
+  /// How many loyalty points the reward costs. Database CHECK >= 1.
+  pointCost     Int
+  isActive      Boolean   @default(true)
+  /// Optional short prefix used when generating voucher codes (e.g. "ORBIZ" → "ORBIZ-X3K7M2P9").
+  /// Null means no voucher code is issued — the redemption record is the proof.
+  voucherPrefix String?
+  /// Maximum total claims. null = unlimited. Database CHECK >= 1 when set.
+  totalStock    Int?
+  /// Running count of claims made (never decremented). Database CHECK >= 0.
+  redeemedCount Int       @default(0)
+  /// Redemption window. null = always available.
+  validFrom     DateTime?
+  validUntil    DateTime?
+  /// True only for rows created by the development seed script.
+  isSample      Boolean   @default(false)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  redemptions RewardRedemption[]
+
+  @@index([isActive, validFrom, validUntil])
+}
+
+/// One student's claim of a reward from the catalog.
+/// A matching LoyaltyTransaction row records the points deducted atomically.
+model RewardRedemption {
+  id            String        @id @default(uuid()) @db.Uuid
+  userId        String        @db.Uuid
+  rewardId      String        @db.Uuid
+  /// The points-deduct entry in the loyalty ledger. Unique: one redemption, one deduction.
+  loyaltyTxId   String        @unique @db.Uuid
+  /// Generated voucher code. Unique across all redemptions. null when the reward has no voucherPrefix.
+  voucherCode   String?       @unique
+  /// Set when the student presents the voucher. null = not yet used.
+  redeemedAt    DateTime?
+  createdAt     DateTime      @default(now())
+
+  user      User              @relation(fields: [userId], references: [id], onDelete: Restrict)
+  reward    RewardCatalog     @relation(fields: [rewardId], references: [id], onDelete: Restrict)
+  loyaltyTx LoyaltyTransaction @relation(fields: [loyaltyTxId], references: [id], onDelete: Restrict)
+
+  @@index([userId, createdAt])
+  @@index([rewardId, createdAt])
+}
+
+// ─── Refund Request Desk ──────────────────────────────────────────────────────
+
+enum RefundRequestStatus {
+  /// Student submitted; awaiting manager/admin decision.
+  PENDING
+  /// Manager or admin approved; money has NOT yet been returned.
+  APPROVED
+  /// Manager or admin rejected the request.
+  REJECTED
+  /// Refund confirmed processed. For wallet orders the wallet has been credited;
+  /// for counter orders the cash was returned offline.
+  PROCESSED
+}
+
+/// A student's manual request for a refund outside the automatic cancel/reject flow.
+/// The automatic wallet refund on cancellation is NOT replaced by this model.
+model RefundRequest {
+  id                 String              @id @default(uuid()) @db.Uuid
+  orderId            String              @db.Uuid
+  requestedByUserId  String              @db.Uuid
+  /// Amount requested in paise. Must not exceed the eligible refundable amount.
+  amountPaise        Int
+  reason             String
+  status             RefundRequestStatus @default(PENDING)
+  decidedByUserId    String?             @db.Uuid
+  decidedAt          DateTime?
+  decisionNote       String?
+  processedAt        DateTime?
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+
+  order       Order @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  requestedBy User  @relation("RefundRequests", fields: [requestedByUserId], references: [id], onDelete: Restrict)
+  decidedBy   User? @relation("RefundDecisions", fields: [decidedByUserId], references: [id], onDelete: Restrict)
+
+  @@index([orderId])
+  @@index([status, createdAt])
+  @@index([requestedByUserId, createdAt])
 }

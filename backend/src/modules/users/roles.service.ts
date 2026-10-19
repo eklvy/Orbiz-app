@@ -6,7 +6,15 @@ import type { Role } from '../../generated/prisma/enums.js';
 import type { Allowlists } from '../auth/provisioning.service.js';
 import { deleteAllSessionsForUser } from '../auth/session.service.js';
 
+/**
+ * Roles that may be granted or revoked via the admin API.
+ * STUDENT is excluded: it is the default given at signup and must never be
+ * revoked through the normal role management flow (it would lock the user out).
+ */
 export type GrantableRole = Exclude<Role, 'STUDENT'>;
+
+/** Persona roles: granted by admin only, no allowlist restriction. */
+const PERSONA_ROLES = new Set<GrantableRole>(['FACULTY', 'STAFF', 'EXECUTIVE', 'GUEST']);
 
 export interface RoleChangeResult {
   userId: string;
@@ -46,11 +54,14 @@ export async function grantRole(
     if (!user.emailVerified) {
       throw new AppError(409, 'EMAIL_NOT_VERIFIED', 'Privileged roles need a verified email.');
     }
-    if (params.role === 'MANAGER' && !params.lists.MANAGER_ALLOWED_EMAILS.includes(email)) {
-      throw new AppError(409, 'NOT_ALLOWLISTED', `${email} is not in MANAGER_ALLOWED_EMAILS.`);
-    }
-    if (params.role === 'POS' && !params.lists.POS_ALLOWED_EMAILS.includes(email)) {
-      throw new AppError(409, 'NOT_ALLOWLISTED', `${email} is not in POS_ALLOWED_EMAILS.`);
+    // Persona roles (FACULTY, STAFF, EXECUTIVE, GUEST) are admin-granted only; no allowlist.
+    if (!PERSONA_ROLES.has(params.role)) {
+      if (params.role === 'MANAGER' && !params.lists.MANAGER_ALLOWED_EMAILS.includes(email)) {
+        throw new AppError(409, 'NOT_ALLOWLISTED', `${email} is not in MANAGER_ALLOWED_EMAILS.`);
+      }
+      if (params.role === 'POS' && !params.lists.POS_ALLOWED_EMAILS.includes(email)) {
+        throw new AppError(409, 'NOT_ALLOWLISTED', `${email} is not in POS_ALLOWED_EMAILS.`);
+      }
     }
 
     const existing = user.roles.find((r) => r.role === params.role);

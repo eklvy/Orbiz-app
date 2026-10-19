@@ -14,9 +14,18 @@ import { issueCredential, revokeCredentials } from '../pickup/pickup.service.js'
 import { notifyOrderStatus } from '../notifications/order-notices.js';
 import { recordReadyObservation } from '../kitchen/kitchen.service.js';
 
-type ActorRole = Extract<Role, 'STUDENT' | 'MANAGER' | 'POS'>;
+/** Roles that may appear as actors in order transitions. */
+type ActorRole = Extract<Role, 'STUDENT' | 'FACULTY' | 'STAFF' | 'EXECUTIVE' | 'MANAGER' | 'POS'>;
 
-const LEAST_PRIVILEGED_FIRST: ActorRole[] = ['STUDENT', 'POS', 'MANAGER'];
+const LEAST_PRIVILEGED_FIRST: ActorRole[] = ['STUDENT', 'FACULTY', 'STAFF', 'EXECUTIVE', 'POS', 'MANAGER'];
+
+/**
+ * True for roles that place orders on their own behalf (ordering personas).
+ * These are treated like STUDENT for audit, notification, and inventory purposes.
+ */
+function isOrderingPersona(role: ActorRole): boolean {
+  return role === 'STUDENT' || role === 'FACULTY' || role === 'STAFF' || role === 'EXECUTIVE';
+}
 
 interface Rule {
   roles: ActorRole[];
@@ -38,7 +47,8 @@ export const TRANSITIONS: Partial<Record<OrderStatus, Partial<Record<OrderStatus
   PLACED: {
     ACCEPTED: { roles: ['MANAGER', 'POS'], reasonRequired: false },
     REJECTED: { roles: ['MANAGER'], reasonRequired: true },
-    CANCELLED: { roles: ['STUDENT'], reasonRequired: false },
+    // All ordering personas (not GUEST) may cancel their own PLACED order.
+    CANCELLED: { roles: ['STUDENT', 'FACULTY', 'STAFF', 'EXECUTIVE'], reasonRequired: false },
   },
   ACCEPTED: {
     PREPARING: { roles: ['MANAGER', 'POS'], reasonRequired: false },
@@ -290,9 +300,13 @@ export async function transitionOrder(
     let stockRestored: string[] = [];
     // (Automatic acceptance never ends an order, so a person is always acting here.)
     if (ending && actingAs) {
+      // Persona roles (FACULTY, STAFF, EXECUTIVE) act as orderers, not staff.
+      const inventoryRole: 'STUDENT' | 'MANAGER' | 'POS' = isOrderingPersona(actingAs)
+        ? 'STUDENT'
+        : (actingAs as 'MANAGER' | 'POS');
       stockRestored = await restoreStockForOrder(tx, {
         orderId: order.id,
-        actor: { userId: req.actorUserId, role: actingAs },
+        actor: { userId: req.actorUserId, role: inventoryRole },
         reason: `Order ${order.pickupCode} ${req.to === 'REJECTED' ? 'rejected' : 'cancelled'}`,
       });
     }
@@ -331,14 +345,14 @@ export async function transitionOrder(
       },
       {
         to: req.to,
-        byStudent: actingAs === 'STUDENT',
+        byStudent: actingAs != null && isOrderingPersona(actingAs),
         reason,
         refundPaise: refunded?.amountPaise ?? 0,
         groupRefundUserIds: groupRefundedUserIds,
       },
     );
 
-    if (actingAs !== 'STUDENT' && ending) {
+    if (actingAs != null && !isOrderingPersona(actingAs) && ending) {
       await recordAudit(tx, {
         actor: { type: 'USER', userId: req.actorUserId },
         action: req.to === 'REJECTED' ? 'ORDER_REJECTED' : 'ORDER_CANCELLED_BY_STAFF',

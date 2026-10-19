@@ -3,6 +3,7 @@ import { parseEnv, type Env } from '../config/env.js';
 import { createApp } from '../app.js';
 import { prisma } from '../lib/prisma.js';
 import type { GoogleOAuthClient, GoogleProfile } from '../modules/auth/google.js';
+import type { ChatProvider } from '../modules/bitebot/bitebot.provider.js';
 
 export const FRONTEND = 'http://localhost:5173';
 
@@ -56,11 +57,14 @@ export class FakeGoogle implements GoogleOAuthClient {
   }
 }
 
-export function buildTestApp(options: { config?: Env; google?: GoogleOAuthClient | null } = {}) {
+export function buildTestApp(
+  options: { config?: Env; google?: GoogleOAuthClient | null; chatProvider?: ChatProvider | null } = {},
+) {
   return createApp({
     db: prisma,
     config: options.config ?? testConfig(),
     google: options.google === undefined ? null : options.google,
+    chatProvider: options.chatProvider,
   });
 }
 

@@ -79,35 +79,34 @@ describe('cart', () => {
     await post(s, '/cart/items', { menuItemId: m.chai.id }).expect(404);
   });
 
-  describe('one outlet per cart', () => {
-    it('explains the conflict and does not silently discard the existing cart', async () => {
-      await addToCart(s, m.chai.id);
-      const other = await makeOutlet({ name: 'Tandoor Corner' });
-      const roll = await makeItem(other.id, (await makeCategory(other.id)).id, { name: 'Roll' });
-
-      const res = await post(s, '/cart/items', { menuItemId: roll.id });
-      expect(res.status).toBe(409);
-      expect(res.body.error).toMatchObject({
-        code: 'CART_OUTLET_CONFLICT',
-        details: {
-          currentOutlet: { name: 'Night Owl Café' },
-          newOutlet: { name: 'Tandoor Corner' },
-        },
-      });
-      const { cart } = (await s.get('/api/v1/cart').expect(200)).body;
-      expect(cart.items.map((i: { name: string }) => i.name)).toEqual(['Chai']);
+  it('allows items from multiple outlets in one cart', async () => {
+    await addToCart(s, m.chai.id);
+    const other = await makeOutlet({ name: 'Tandoor Corner', status: 'OPEN' });
+    const roll = await makeItem(other.id, (await makeCategory(other.id)).id, {
+      name: 'Roll',
+      pricePaise: 4500,
     });
 
-    it('starts a new cart only when the student explicitly asks', async () => {
-      await addToCart(s, m.chai.id);
-      const other = await makeOutlet({ name: 'Tandoor Corner' });
-      const roll = await makeItem(other.id, (await makeCategory(other.id)).id, { name: 'Roll' });
-      const res = await post(s, '/cart/items', { menuItemId: roll.id, replaceCart: true }).expect(
-        200,
-      );
-      expect(res.body.cart.outlet.name).toBe('Tandoor Corner');
-      expect(res.body.cart.items.map((i: { name: string }) => i.name)).toEqual(['Roll']);
-    });
+    const res = await post(s, '/cart/items', { menuItemId: roll.id }).expect(200);
+    const cart = res.body.cart;
+    // Multi-outlet: top-level outlet is null, outletGroups has both
+    expect(cart.outlet).toBeNull();
+    expect(cart.isMultiOutlet).toBe(true);
+    expect(cart.outletGroups).toHaveLength(2);
+    expect(cart.items).toHaveLength(2);
+    expect(cart.subtotalPaise).toBe(2000 + 4500);
+    expect(cart.canCheckout).toBe(true);
+  });
+
+  it('replaceCart clears existing items before adding', async () => {
+    await addToCart(s, m.chai.id);
+    const other = await makeOutlet({ name: 'Tandoor Corner', status: 'OPEN' });
+    const roll = await makeItem(other.id, (await makeCategory(other.id)).id, { name: 'Roll' });
+    const res = await post(s, '/cart/items', { menuItemId: roll.id, replaceCart: true }).expect(
+      200,
+    );
+    expect(res.body.cart.outlet!.name).toBe('Tandoor Corner');
+    expect(res.body.cart.items.map((i: { name: string }) => i.name)).toEqual(['Roll']);
   });
 
   it('flags items that became unavailable and blocks checkout until they are removed', async () => {

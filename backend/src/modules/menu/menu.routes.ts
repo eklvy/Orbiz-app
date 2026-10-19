@@ -22,6 +22,7 @@ export function campusMenuRouter(db: Database) {
         categoryId: query.category,
         q: query.q,
         dietary: query.dietary,
+        spiceLevel: query.spiceLevel,
         inStockOnly: query.inStock,
         sort: query.sort,
         viewerId: studentId(req),

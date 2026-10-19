@@ -45,8 +45,28 @@ import {
 import { reorderRouter, savedCombosRouter } from './modules/reorder/reorder.routes.js';
 import { staffPickupRouter, studentPickupRouter } from './modules/pickup/pickup.routes.js';
 import { campusMenuRouter } from './modules/menu/menu.routes.js';
+import { menuItemNutritionRouter } from './modules/menu/nutrition.routes.js';
+import { campusMapRouter } from './modules/map/map.routes.js';
 import { notificationsRouter } from './modules/notifications/notifications.routes.js';
+import { publicTablesRouter, staffTablesRouter } from './modules/tables/tables.routes.js';
+import { reservationsRouter, staffReservationsRouter } from './modules/tables/reservations.routes.js';
+import { bitebotRouter } from './modules/bitebot/bitebot.routes.js';
+import { bitebotProviderFor, type ChatProvider } from './modules/bitebot/bitebot.provider.js';
+import {
+  adminRewardsRouter,
+  myRewardsRouter,
+  redeemRewardRouter,
+  rewardsRouter,
+} from './modules/rewards/rewards.routes.js';
+import { myBudgetRouter, adminUserBudgetRouter } from './modules/budget/budget.routes.js';
+import { studentInvoiceRouter, adminInvoiceRouter } from './modules/invoice/invoice.routes.js';
+import {
+  orderRefundRouter,
+  adminRefundRouter,
+  staffRefundRouter,
+} from './modules/refunds/refund.routes.js';
 import { kitchenRouter, trackingRouter } from './modules/kitchen/kitchen.routes.js';
+import { uploadsRouter } from './modules/uploads/upload.routes.js';
 import { csrfProtection } from './middleware/csrf.js';
 import { loadSession } from './middleware/auth.js';
 import { moneyActionLimiter } from './middleware/rate-limit.js';
@@ -62,6 +82,8 @@ export interface AppDependencies {
   realtime?: RealtimePublisher;
   /** Optional AI step for Surprise Meal. Defaults to none configured; tests pass a fake. */
   comboAdvisor?: ComboAdvisor | null;
+  /** Optional AI provider for BiteBot chat. Defaults to Claude when ANTHROPIC_API_KEY is set. */
+  chatProvider?: ChatProvider | null;
 }
 
 /**
@@ -74,7 +96,10 @@ export function createApp({
   google,
   realtime = noopPublisher,
   comboAdvisor = advisorFor(),
+  chatProvider,
 }: AppDependencies) {
+  const resolvedChatProvider =
+    chatProvider !== undefined ? chatProvider : bitebotProviderFor(config.ANTHROPIC_API_KEY);
   const googleSettings = googleConfig(config);
   const googleClient =
     google !== undefined ? google : googleSettings ? createGoogleClient(googleSettings) : null;
@@ -115,11 +140,14 @@ export function createApp({
   api.use('/me/profile', profileRouter(db));
   api.use('/me/reviews', myReviewsRouter(db));
   api.use('/me/notifications', notificationsRouter(db));
+  api.use('/menu-items', menuItemNutritionRouter(db));
   api.use('/menu-items', menuItemReviewsRouter(db));
   api.use('/reviews', reviewsRouter(db));
   api.use('/outlets/:slug/slots', slotsRouter(db));
+  api.use('/outlets/:slug/tables', publicTablesRouter(db));
   api.use('/outlets/:slug', outletPollRouter(db, realtime));
   api.use('/outlets', publicOutletsRouter(db));
+  api.use('/map', campusMapRouter(db));
   api.use('/menu', campusMenuRouter(db));
   api.use('/specials', specialsRouter(db, realtime));
   api.use('/polls', votesRouter(db, realtime));
@@ -148,6 +176,22 @@ export function createApp({
   api.use('/splits', splitsRouter(db, realtime, config));
   api.use('/banquets', banquetsRouter(db, realtime));
   api.use('/staff/outlets/:outletId/banquets', staffBanquetsRouter(db, realtime));
+  api.use('/staff/outlets/:outletId/tables', staffTablesRouter(db));
+  api.use('/staff/outlets/:outletId/reservations', staffReservationsRouter(db));
+  api.use('/reservations', reservationsRouter(db));
+  api.use('/chat/bitebot', bitebotRouter(db, config, resolvedChatProvider));
+  api.use('/rewards', rewardsRouter(db));
+  api.use('/rewards', redeemRewardRouter(db));
+  api.use('/me/rewards', myRewardsRouter(db));
+  api.use('/admin/rewards', adminRewardsRouter(db));
+  api.use('/me/budget', myBudgetRouter(db));
+  api.use('/admin/users/:userId/budget', adminUserBudgetRouter(db));
+  api.use('/orders/:orderId/invoice', studentInvoiceRouter(db));
+  api.use('/admin/orders/:orderId/invoice', adminInvoiceRouter(db));
+  api.use('/orders/:orderId/refund-request', orderRefundRouter(db));
+  api.use('/admin/refund-requests', adminRefundRouter(db));
+  api.use('/staff/outlets/:outletId/refund-requests', staffRefundRouter(db));
+  api.use('/uploads', uploadsRouter(config));
   // The payment simulator exists only when mock mode is on — never in production.
   if (rechargeProviderFor(config)?.name === 'MOCK') {
     api.use('/payments/mock', mockPaymentsRouter(db, config, realtime));
